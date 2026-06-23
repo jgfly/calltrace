@@ -9,11 +9,13 @@ import threading
 from .tracer import Tracer
 from .tree import collapse, count_nodes, max_depth
 from .render import render_html
+from .source import collect_snippets, SourceServer
 from . import filters
 
 
 def run(script, script_args, step_in_dirs, step_all_imports, output,
-        collapse_loops=True, record_external=True, base_dir=None):
+        collapse_loops=True, record_external=True, base_dir=None,
+        serve=False, port=None):
     script = os.path.abspath(script)
     script_dir = os.path.dirname(script)
 
@@ -42,23 +44,39 @@ def run(script, script_args, step_in_dirs, step_all_imports, output,
         sys.settrace(None)
         threading.settrace(None)
         elapsed = time.perf_counter() - start
-        _emit(tracer, script, output, base, elapsed, collapse_loops)
+        _emit(tracer, script, output, base, elapsed, collapse_loops,
+              step_in_dirs, serve, port)
         raise
     finally:
         sys.settrace(None)
         threading.settrace(None)
 
     elapsed = time.perf_counter() - start
-    _emit(tracer, script, output, base, elapsed, collapse_loops)
+    _emit(tracer, script, output, base, elapsed, collapse_loops,
+          step_in_dirs, serve, port)
     return exit_code
 
 
-def _emit(tracer, script, output, base, elapsed, collapse_loops):
+def _emit(tracer, script, output, base, elapsed, collapse_loops,
+          step_in_dirs, serve, port):
     root = tracer.root
     if collapse_loops:
         collapse(root, base=base)
     collapsed_nodes = count_nodes(root)
     depth = max_depth(root)
+
+    # Source-on-hover: embed per-function snippets by default (offline), or bake
+    # a server URL when --serve is used (no code in the HTML). In serve mode the
+    # server is constructed first so its real port is known and can be baked in.
+    server = None
+    snippets = None
+    src_url = None
+    if serve:
+        server = SourceServer(base, step_in_dirs, port=port or 0)
+        src_url = server.url.rstrip("/")
+    else:
+        snippets = collect_snippets(root, base)
+
     html = render_html(
         root,
         script=script,
@@ -70,6 +88,14 @@ def _emit(tracer, script, output, base, elapsed, collapse_loops):
         collapsed=collapse_loops,
         step_in_dirs=tracer.step_in_dirs,
         step_all_imports=tracer.step_all_imports,
+        snippets=snippets,
+        src_url=src_url,
     )
     with open(output, "w", encoding="utf-8") as f:
         f.write(html)
+
+    if serve:
+        server.html = html
+        print(f"[calltrace] serving report at {server.url} (Ctrl+C to stop)",
+              file=sys.stderr)
+        server.serve_forever(open_browser=True)

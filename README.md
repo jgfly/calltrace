@@ -38,6 +38,32 @@ see that the call happened, but not the package's internals.
                        calls. Fastest, most focused.
 --no-collapse          Emit the raw call tree (no loop collapsing).
 -o, --output FILE      Output HTML path (default: ./calltrace_report.html).
+--serve                Serve the report from a local HTTP server and read source
+                       code on demand on hover (no code embedded in the HTML).
+                       Opens a browser; Ctrl+C to stop.
+--port N               Port for --serve (default: 0 = auto-pick a free port).
+```
+
+## Hover to see source code
+
+Every call row carries the file + definition line it came from. Hovering a row
+pops up a tooltip showing that function's source, with the `def`/`class` line
+highlighted. There are two ways the code reaches the browser:
+
+* **Default (embedded).** Only the referenced functions' bodies are pulled out
+  and baked into the HTML as a deduplicated map — never whole files. The report
+  works offline (just open the `.html`), at a modest size cost.
+* **`--serve` (no code in the HTML).** A tiny local server serves the report and
+  a `/src` endpoint; the page fetches the exact source window on hover, so the
+  HTML stays minimal. Only files under your `--project`/script dir are served —
+  path traversal and symlink escapes are rejected.
+
+```
+# embedded (default) — offline, double-click to open
+python -m calltrace --project nano-vllm-test/ -o report.html example.py
+
+# served — smallest HTML, source fetched on demand
+python -m calltrace --serve --project nano-vllm-test/ example.py
 ```
 
 > Options must come **before** the script name (anything after the script is

@@ -53,6 +53,19 @@ def build_parser():
         "-o", "--output", default=None,
         help="Output HTML path (default: ./calltrace_report.html).",
     )
+    p.add_argument(
+        "--serve", action="store_true",
+        help=(
+            "Serve the report from a local HTTP server and read source code on "
+            "demand (no code embedded in the HTML). Opens a browser; Ctrl+C to "
+            "stop. Without this flag, per-function snippets are embedded so the "
+            "HTML works offline."
+        ),
+    )
+    p.add_argument(
+        "--port", type=int, default=0,
+        help="Port for --serve (default: 0 = pick a free port automatically).",
+    )
     return p
 
 
@@ -79,6 +92,8 @@ def main(argv=None):
         output=output,
         collapse_loops=not args.no_collapse,
         record_external=not args.no_external_leaves,
+        serve=args.serve,
+        port=args.port,
     )
     print(f"[calltrace] report written to: {output}", file=sys.stderr)
     return exit_code
