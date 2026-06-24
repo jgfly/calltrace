@@ -46,6 +46,33 @@ from .tree import CallNode
 from . import filters
 
 
+# Cached result of the torch._dynamo.utils.is_compiling lookup.
+# None = not yet resolved; True/False = resolved.
+_DYNAMO_IS_COMPILING = None
+
+
+def _in_dynamo():
+    """Return True when torch._dynamo is currently tracing Python bytecode.
+
+    Dynamo walks the bytecode of the function it is compiling.  If our
+    ``sys.settrace`` hook is active at that moment, Dynamo follows it into
+    ``_local_trace`` → ``_on_return`` → ``time.perf_counter()``, which is a
+    C builtin Dynamo cannot trace, and raises ``Unsupported``.  Bailing out
+    when Dynamo is active avoids the crash entirely.
+    """
+    global _DYNAMO_IS_COMPILING
+    if _DYNAMO_IS_COMPILING is None:
+        try:
+            import torch._dynamo.utils as _du
+            _DYNAMO_IS_COMPILING = _du.is_compiling
+        except Exception:
+            # torch not installed, or import failed — Dynamo is not active.
+            _DYNAMO_IS_COMPILING = False
+    if _DYNAMO_IS_COMPILING is False:
+        return False
+    return _DYNAMO_IS_COMPILING()
+
+
 class Tracer:
     def __init__(self, step_in_dirs, step_all_imports, record_external=True):
         self.step_in_dirs = [filters._norm(d) for d in step_in_dirs if d]
@@ -57,6 +84,19 @@ class Tracer:
         self._tl = threading.local()
         self._lock = threading.Lock()
         self._step_cache = {}
+
+    def _now(self):
+        """Return a monotonic timestamp, or 0.0 when Dynamo is compiling.
+
+        ``time.perf_counter()`` is a C builtin that torch._dynamo cannot trace.
+        When Dynamo is actively compiling we must not call it, or Dynamo raises
+        ``Unsupported``.  Returning 0.0 is safe because we also bail out of
+        tracing entirely during Dynamo compilation (see ``global_trace`` and
+        ``_local_trace``), so no node is ever created with a stale ``t0``.
+        """
+        if _in_dynamo():
+            return 0.0
+        return time.perf_counter()
 
     # -- thread-local state -------------------------------------------------
 
@@ -84,14 +124,17 @@ class Tracer:
         f = filters._norm(filename)
         if self._excluded(f):
             return False
+        # Explicit --project dirs have highest priority: if the user named a
+        # directory we always step into it, even when it lives inside
+        # site-packages (e.g. ``--project …/site-packages/vllm``).
+        for d in self.step_in_dirs:
+            if f == d or f.startswith(d + os.sep):
+                return True
         # Anything in site-packages is a third-party dependency, never "the
         # project" -- even when the venv physically lives under the project
         # directory (e.g. ./project/.venv). Only descend with --step-all-imports.
         if filters.is_sitepackage(filename):
             return self.step_all_imports
-        for d in self.step_in_dirs:
-            if f == d or f.startswith(d + os.sep):
-                return True
         if self.step_all_imports and not filters.is_stdlib(filename):
             return True
         return False
@@ -129,7 +172,7 @@ class Tracer:
         if step:
             self._tl.started = True
             node = CallNode(name=name, filename=filename, lineno=lineno, external=False)
-            node.t0 = time.perf_counter()
+            node.t0 = self._now()
             parent = self._parent_node(frame)
             with self._lock:
                 parent.add_child(node)
@@ -153,16 +196,24 @@ class Tracer:
     def _on_return(self, frame):
         node = self._nodes().pop(id(frame), None)
         if node is not None:
-            node.duration += time.perf_counter() - node.t0
+            node.duration += self._now() - node.t0
 
     # -- trace functions ----------------------------------------------------
 
     def global_trace(self, frame, event, arg):
         if event == "call":
+            # When torch._dynamo is compiling, any active sys.settrace hook
+            # interferes with Dynamo's own bytecode walking.  Bail out so
+            # Dynamo never follows us into time.perf_counter (a C builtin
+            # it cannot trace).
+            if _in_dynamo():
+                return None
             return self._on_call(frame)
         return None
 
     def _local_trace(self, frame, event, arg):
+        if _in_dynamo():
+            return None
         if event == "return":
             self._on_return(frame)
             return self._local_trace
