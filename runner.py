@@ -5,12 +5,59 @@ import sys
 import time
 import runpy
 import threading
+import multiprocessing
+import multiprocessing.process
 
 from .tracer import Tracer
 from .tree import collapse, count_nodes, max_depth
 from .render import render_html
 from .source import collect_snippets, SourceServer
 from . import filters
+
+
+def _patch_multiprocessing():
+    """Prevent child processes from inheriting the sys.settrace hook.
+
+    vLLM (and similar frameworks) spawn worker subprocesses via
+    ``multiprocessing.Process``.  If the child inherits our ``sys.settrace``
+    hook, and the child later calls ``torch.compile`` (Dynamo), Dynamo will
+    walk the bytecode, encounter the trace function, follow it into
+    ``time.perf_counter()`` (a C builtin), and crash with
+    ``torch._dynamo.exc.Unsupported``.
+
+    We fix this two ways:
+
+    1. **spawn start method**: Monkey-patch ``Process.start`` to temporarily
+       clear ``sys.settrace`` / ``threading.settrace`` around the original
+       ``start()`` call, so the child is never created with an active trace.
+    2. **fork start method**: Register an ``os.register_at_fork`` handler
+       that clears the trace in the child immediately after fork.
+    """
+    _orig_start = multiprocessing.process.BaseProcess.start
+
+    def _patched_start(self, *args, **kwargs):
+        old_trace = sys.gettrace()
+        old_thread_trace = threading.gettrace()
+        sys.settrace(None)
+        threading.settrace(None)
+        try:
+            return _orig_start(self, *args, **kwargs)
+        finally:
+            sys.settrace(old_trace)
+            threading.settrace(old_thread_trace)
+
+    multiprocessing.process.BaseProcess.start = _patched_start
+
+    # Belt-and-suspenders for the fork start method (Linux/macOS only).
+    if hasattr(os, "register_at_fork"):
+        def _clear_after_fork():
+            sys.settrace(None)
+            threading.settrace(None)
+        try:
+            os.register_at_fork(after_in_child=_clear_after_fork)
+        except (OSError, RuntimeError):
+            # Already registered or not supported – fine.
+            pass
 
 
 def run(script, script_args, step_in_dirs, step_all_imports, output,
@@ -29,6 +76,10 @@ def run(script, script_args, step_in_dirs, step_all_imports, output,
     # Never trace into the calltrace tool itself.
     here = os.path.dirname(os.path.abspath(__file__))
     tracer.exclude_dirs.append(filters._norm(here))
+
+    # Prevent child processes from inheriting our sys.settrace hook,
+    # which would crash torch.compile (Dynamo) inside them.
+    _patch_multiprocessing()
 
     start = time.perf_counter()
     sys.settrace(tracer.global_trace)
