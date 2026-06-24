@@ -69,11 +69,12 @@ def _render_node(node, base, depth):
             f'<span class="loop-ico">↻</span>'
             f'<span class="loop-lbl">loop</span>'
             f'<span class="count" title="iterations">×{node.count}</span>'
-            f'<span class="fn loop-body">body: {body_names}</span>'
+            f'<span class="fn loop-body">body: {body_names}<button class="expand-sub" onclick="expandSubtree(this.closest(\'details\'))" title="expand all calls below">⊞</button></span>'
         )
     else:
         name_esc = _html.escape(node.name)
-        label = f'<span class="fn" style="color:{_color_for(node.name)}">{name_esc}</span>'
+        btn = '<button class="expand-sub" onclick="expandSubtree(this.closest(\'details\'))" title="expand all calls below">⊞</button>'
+        label = f'<span class="fn" style="color:{_color_for(node.name)}">{name_esc}{btn}</span>'
         if node.count > 1:
             label += f'<span class="count" title="repeat count">×{node.count}</span>'
         if node.external:
@@ -273,6 +274,7 @@ async function resolveCode(file, line) {
 
 function attachHover(el) {
   el.addEventListener('mouseenter', (e) => {
+    if (!hoverEnabled) return;
     const file = el.getAttribute('data-file');
     const line = parseInt(el.getAttribute('data-line'), 10);
     if (!file || !line) return;
@@ -409,6 +411,14 @@ details.node[open] > summary .chev::before {{ content: "▾"; }}
 .loop-lbl {{ color: var(--loop); font-weight: 600; }}
 .loop-body {{ color: var(--muted); font-weight: 400; font-size: 12px; }}
 .node.hidden {{ display: none; }}
+.expand-sub {{
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 11px; padding: 0 3px;
+  margin-left: 24px;
+  opacity: 0; transition: opacity .15s;
+}}
+.fn:hover .expand-sub {{ opacity: 1; }}
+.expand-sub:hover {{ color: var(--accent); }}
 .empty {{ color: var(--muted); padding: 20px 0; }}
 
 #ct-tip {{
@@ -464,6 +474,7 @@ details.node[open] > summary .chev::before {{ content: "▾"; }}
   <div class="controls">
     <button onclick="expandAll()">expand all</button>
     <button onclick="collapseAll()">collapse all</button>
+    <button id="hover-toggle" onclick="toggleHover()">hover source: on</button>
     <input id="filter" placeholder="filter by function name…" oninput="doFilter()">
   </div>
   <div class="legend">
@@ -487,6 +498,16 @@ const CT_SRC_URL  = CT_DATA.src_url  || null;   // serve mode: base URL to fetch
 
 function expandAll() {{ document.querySelectorAll('details.node').forEach(d => d.open = true); }}
 function collapseAll() {{ document.querySelectorAll('details.node').forEach((d,i) => d.open = false); }}
+function expandSubtree(detailsEl) {{
+  detailsEl.querySelectorAll('details.node').forEach(d => d.open = true);
+  detailsEl.open = true;
+}}
+let hoverEnabled = true;
+function toggleHover() {{
+  hoverEnabled = !hoverEnabled;
+  document.getElementById('hover-toggle').textContent =
+    'hover source: ' + (hoverEnabled ? 'on' : 'off');
+}}
 function doFilter() {{
   const q = document.getElementById('filter').value.trim().toLowerCase();
   const all = document.querySelectorAll('.node');
