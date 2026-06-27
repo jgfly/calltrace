@@ -69,11 +69,11 @@ def _render_node(node, base, depth):
             f'<span class="loop-ico">↻</span>'
             f'<span class="loop-lbl">loop</span>'
             f'<span class="count" title="iterations">×{node.count}</span>'
-            f'<span class="fn loop-body">body: {body_names}<button class="expand-sub" onclick="expandSubtree(this.closest(\'details\'))" title="expand all calls below">⊞</button></span>'
+            f'<span class="fn loop-body">body: {body_names}<button class="expand-sub" onclick="toggleSubtree(this.closest(\'details\'))" title="toggle: expand / collapse all calls below">⊞</button></span>'
         )
     else:
         name_esc = _html.escape(node.name)
-        btn = '<button class="expand-sub" onclick="expandSubtree(this.closest(\'details\'))" title="expand all calls below">⊞</button>'
+        btn = '<button class="expand-sub" onclick="toggleSubtree(this.closest(\'details\'))" title="toggle: expand / collapse all calls below">⊞</button>'
         label = f'<span class="fn" style="color:{_color_for(node.name)}">{name_esc}{btn}</span>'
         if node.count > 1:
             label += f'<span class="count" title="repeat count">×{node.count}</span>'
@@ -93,12 +93,12 @@ def _render_node(node, base, depth):
             _render_node(c, base, depth + 1) for c in children
         )
         return (
-            f'<details class="node"{open_attr}{data_attrs}>'
+            f'<details class="node"{open_attr} data-depth="{depth}"{data_attrs}>'
             f'<summary>{label}<span class="chev"></span></summary>'
             f'<div class="children">{child_html}</div>'
             f'</details>'
         )
-    return f'<div class="node leaf"><div class="leafrow"{data_attrs}>{label}</div></div>'
+    return f'<div class="node leaf" data-depth="{depth}"><div class="leafrow"{data_attrs}>{label}</div></div>'
 
 
 # Tooltip JS, kept as a *raw* string so backslashes (`\\`, `\n`) and braces are
@@ -368,6 +368,9 @@ h1 .tag {{ color: var(--accent); }}
   border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 12px; width: 240px;
 }}
 .controls input::placeholder {{ color: var(--muted); }}
+.depth-ctrl {{ display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }}
+.depth-ctrl input[type="range"] {{ width: 150px; padding: 0; accent-color: var(--accent); }}
+.depth-ctrl b {{ color: var(--txt); min-width: 16px; text-align: center; font-weight: 600; }}
 main {{ padding: 14px 20px 60px; }}
 .legend {{ color: var(--muted); font-size: 11px; margin-top: 8px; }}
 .legend span {{ margin-right: 12px; }}
@@ -475,7 +478,12 @@ details.node[open] > summary .chev::before {{ content: "▾"; }}
     <button onclick="expandAll()">expand all</button>
     <button onclick="collapseAll()">collapse all</button>
     <button id="hover-toggle" onclick="toggleHover()">hover source: on</button>
-    <input id="filter" placeholder="filter by function name…" oninput="doFilter()">
+    <input id="filter" placeholder="filter by function name…" oninput="applyFilters()">
+    <div class="depth-ctrl">
+      <span>depth ≤</span>
+      <input type="range" id="depth-slider" min="1" max="{depth_max}" value="{depth_max}" oninput="onDepthChange()">
+      <b id="depth-val">{depth_max}</b>
+    </div>
   </div>
   <div class="legend">
     <span><span class="b" style="background:var(--loop)"></span>loop block</span>
@@ -498,9 +506,18 @@ const CT_SRC_URL  = CT_DATA.src_url  || null;   // serve mode: base URL to fetch
 
 function expandAll() {{ document.querySelectorAll('details.node').forEach(d => d.open = true); }}
 function collapseAll() {{ document.querySelectorAll('details.node').forEach((d,i) => d.open = false); }}
-function expandSubtree(detailsEl) {{
-  detailsEl.querySelectorAll('details.node').forEach(d => d.open = true);
-  detailsEl.open = true;
+function toggleSubtree(detailsEl) {{
+  // Toggle the whole subtree: if this node and every call below it is open,
+  // collapse them all; otherwise expand them all.
+  const subs = detailsEl.querySelectorAll('details.node');
+  const expanded = detailsEl.open && Array.from(subs).every(d => d.open);
+  if (expanded) {{
+    detailsEl.open = false;
+    subs.forEach(d => (d.open = false));
+  }} else {{
+    detailsEl.open = true;
+    subs.forEach(d => (d.open = true));
+  }}
 }}
 let hoverEnabled = true;
 function toggleHover() {{
@@ -508,22 +525,37 @@ function toggleHover() {{
   document.getElementById('hover-toggle').textContent =
     'hover source: ' + (hoverEnabled ? 'on' : 'off');
 }}
-function doFilter() {{
+// ---- depth + name filters (applied together) -----------------------------
+let depthLimit = {depth_max};   // current slider value; nodes deeper than this are hidden
+function applyFilters() {{
   const q = document.getElementById('filter').value.trim().toLowerCase();
   const all = document.querySelectorAll('.node');
-  if (!q) {{ all.forEach(n => n.classList.remove('hidden')); return; }}
   all.forEach(n => {{
-    const sum = n.querySelector('summary, .leafrow');
-    const text = sum ? sum.textContent.toLowerCase() : '';
-    // show if this node or any descendant matches
-    const descMatch = n.querySelectorAll('.fn, .loc').length &&
-      Array.from(n.querySelectorAll('*')).some(e => e.textContent.toLowerCase().includes(q));
-    if (text.includes(q) || descMatch) {{
-      n.classList.remove('hidden');
+    const depth = parseInt(n.getAttribute('data-depth'), 10) || 0;
+    let hidden = depth > depthLimit;
+    if (!hidden && q) {{
+      const sum = n.querySelector('summary, .leafrow');
+      const text = sum ? sum.textContent.toLowerCase() : '';
+      // show if this node or any descendant matches
+      const descMatch = n.querySelectorAll('.fn, .loc').length &&
+        Array.from(n.querySelectorAll('*')).some(e => e.textContent.toLowerCase().includes(q));
+      if (!(text.includes(q) || descMatch)) hidden = true;
+    }}
+    n.classList.toggle('hidden', hidden);
+  }});
+  // For name matches: reveal (un-hide + open) the ancestor path so each hit is visible.
+  if (q) {{
+    document.querySelectorAll('.node:not(.hidden)').forEach(n => {{
       let p = n.parentElement;
       while (p && p.tagName === 'DETAILS') {{ p.classList.remove('hidden'); p.open = true; p = p.parentElement.parentElement; }}
-    }} else {{ n.classList.add('hidden'); }}
-  }});
+    }});
+  }}
+}}
+function onDepthChange() {{
+  const s = document.getElementById('depth-slider');
+  depthLimit = parseInt(s.value, 10);
+  document.getElementById('depth-val').textContent = depthLimit;
+  applyFilters();
 }}
 
 // ---- hover source tooltip (injected as raw text, not via .format) ---------
@@ -565,6 +597,7 @@ def render_html(root, script, base, raw_calls, collapsed_nodes, max_depth,
         raw_calls=f"{raw_calls:,}",
         collapsed_nodes=f"{collapsed_nodes:,}",
         max_depth=max_depth,
+        depth_max=max(1, max_depth),
         wall=_fmt_dur(elapsed),
         collapsed="yes" if collapsed else "no",
         tree=tree,
